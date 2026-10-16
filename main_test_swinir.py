@@ -17,6 +17,10 @@ def main():
                                                                      'gray_dn, color_dn, jpeg_car, color_jpeg_car')
     parser.add_argument('--scale', type=int, default=1, help='scale factor: 1, 2, 3, 4, 8') # 1 for dn and jpeg car
     parser.add_argument('--noise', type=int, default=15, help='noise level: 15, 25, 50')
+    # [Aporte propio] tipo de degradación para gray_dn (por defecto, el original: ruido gaussiano)
+    parser.add_argument('--noise_type', type=str, default='gaussian', choices=['gaussian', 'saltpepper', 'blur'],
+                        help='gray_dn only: gaussian (original), saltpepper (impulsive) or blur (gaussian blur + noise 0.01)')
+    parser.add_argument('--sp_prob', type=float, default=0.05, help='salt-and-pepper probability for --noise_type saltpepper')
     parser.add_argument('--jpeg', type=int, default=40, help='scale factor: 10, 20, 30, 40')
     parser.add_argument('--training_patch_size', type=int, default=128, help='patch size used in training SwinIR. '
                                        'Just used to differentiate two different settings in Table 2 of the paper. '
@@ -186,7 +190,10 @@ def define_model(args):
                     mlp_ratio=2, upsampler='', resi_connection='1conv')
         param_key_g = 'params'
 
-    pretrained_model = torch.load(args.model_path)
+    try:
+        pretrained_model = torch.load(args.model_path, weights_only=False)
+    except TypeError:
+        pretrained_model = torch.load(args.model_path)
     model.load_state_dict(pretrained_model[param_key_g] if param_key_g in pretrained_model.keys() else pretrained_model, strict=True)
 
     return model
@@ -212,6 +219,8 @@ def setup(args):
     # 004 grayscale image denoising/ 005 color image denoising
     elif args.task in ['gray_dn', 'color_dn']:
         save_dir = f'results/swinir_{args.task}_noise{args.noise}'
+        if getattr(args, 'noise_type', 'gaussian') != 'gaussian':  # [Aporte propio]
+            save_dir += f'_{args.noise_type}'
         folder = args.folder_gt
         border = 0
         window_size = 8
@@ -244,7 +253,18 @@ def get_image_pair(args, path):
     elif args.task in ['gray_dn']:
         img_gt = cv2.imread(path, cv2.IMREAD_GRAYSCALE).astype(np.float32) / 255.
         np.random.seed(seed=0)
-        img_lq = img_gt + np.random.normal(0, args.noise / 255., img_gt.shape)
+        noise_type = getattr(args, 'noise_type', 'gaussian')
+        if noise_type == 'gaussian':  # comportamiento original
+            img_lq = img_gt + np.random.normal(0, args.noise / 255., img_gt.shape)
+        elif noise_type == 'saltpepper':  # [Aporte propio] ruido impulsivo
+            r = np.random.random(img_gt.shape)
+            img_lq = img_gt.copy()
+            img_lq[r < args.sp_prob / 2] = 0.
+            img_lq[(r >= args.sp_prob / 2) & (r < args.sp_prob)] = 1.
+        else:  # 'blur': [Aporte propio] desenfoque gaussiano (PSF 15x15, sigma 2) + ruido gaussiano 0.01
+            from restauracion_clasica import psf_gaussiana, desenfoque
+            borroso, _ = desenfoque(img_gt, psf_gaussiana(15, 2.0))
+            img_lq = np.clip(borroso + np.random.normal(0, 0.01, img_gt.shape), 0, 1)
         img_gt = np.expand_dims(img_gt, axis=2)
         img_lq = np.expand_dims(img_lq, axis=2)
 
